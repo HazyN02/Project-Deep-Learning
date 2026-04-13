@@ -5,10 +5,20 @@ from sklearn.preprocessing import StandardScaler
 from ucimlrepo import fetch_ucirepo
 
 def load_pima():
-    """Pima Indians Diabetes dataset (UCI ID: 34)"""
-    dataset = fetch_ucirepo(id=34)
-    X = dataset.data.features.copy()
-    y = dataset.data.targets.copy().values.ravel()
+    """Pima Indians Diabetes dataset.
+
+    UCI id=34 is restricted from programmatic import; falls back to the
+    identical dataset via sklearn/OpenML (name='diabetes', version=1).
+    """
+    try:
+        dataset = fetch_ucirepo(id=34)
+        X = dataset.data.features.copy()
+        y = dataset.data.targets.copy().values.ravel()
+    except Exception:
+        from sklearn.datasets import fetch_openml
+        data = fetch_openml(name='diabetes', version=1, as_frame=True)
+        X = data.data.copy()
+        y = data.target.values
     # Binarize: tested_positive=1, tested_negative=0
     y = (y == 'tested_positive').astype(int)
     return X, y
