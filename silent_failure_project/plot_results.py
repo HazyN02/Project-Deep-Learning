@@ -103,4 +103,4 @@ if __name__ == "__main__":
     for dataset_name in df["dataset"].unique():
         plot_detection_delay_heatmap(df, dataset_name)
         plot_alarm_vs_drop(df, dataset_name)
-    print("\n✓ All plots saved to results/")
+    print("\nAll plots saved to results/")

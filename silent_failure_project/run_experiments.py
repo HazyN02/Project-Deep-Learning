@@ -107,7 +107,7 @@ def main():
     df = pd.DataFrame(all_rows)
     out_path = "results/detection_delay_table.csv"
     df.to_csv(out_path, index=False)
-    print(f"\n✓ Results saved to {out_path}")
+    print(f"\nResults saved to {out_path}")
     print(df.to_string(index=False))
 
 
