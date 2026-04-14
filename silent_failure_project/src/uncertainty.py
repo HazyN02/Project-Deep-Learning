@@ -1,6 +1,5 @@
 import numpy as np
-from mapie.classification import MapieClassifier
-from mapie.conformity_scores import LACConformityScore
+from mapie.classification import SplitConformalClassifier
 from ngboost import NGBClassifier
 from ngboost.distns import Bernoulli
 from scipy.stats import entropy as scipy_entropy
@@ -14,14 +13,15 @@ from src.models import mc_dropout_predict
 def fit_conformal(base_model, X_train, y_train, X_cal, y_cal, alpha=0.1):
     """
     Wraps a fitted XGBoost model with MAPIE conformal prediction.
-    Returns the fitted MapieClassifier.
+    Returns the conformalized SplitConformalClassifier.
+    MAPIE 1.x API: pass prefit estimator, then call conformalize().
     """
-    mapie = MapieClassifier(
+    mapie = SplitConformalClassifier(
         estimator=base_model,
-        method="score",
-        cv="prefit",
+        conformity_score="lac",
+        prefit=True,
     )
-    mapie.fit(X_cal, y_cal)
+    mapie.conformalize(X_cal, y_cal)
     return mapie
 
 
@@ -30,7 +30,7 @@ def conformal_uncertainty(mapie_model, X, alpha=0.1):
     Returns uncertainty as 1 - max softmax probability (non-conformity score proxy).
     Higher = more uncertain.
     """
-    proba = mapie_model.predict_proba(X)  # shape (N, 2)
+    proba = mapie_model._estimator.predict_proba(X)  # shape (N, 2)
     uncertainty = 1.0 - proba.max(axis=1)
     return uncertainty
 
