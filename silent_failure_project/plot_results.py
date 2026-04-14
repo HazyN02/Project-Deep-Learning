@@ -166,10 +166,68 @@ def plot_training_curves(losses_path="results/training_losses.json"):
     print(f"Saved: {path}")
 
 
+def plot_training_curves_per_dataset(dataset_name, losses_path="results/training_losses.json"):
+    """
+    Plot training loss curves for a single dataset and save to
+    results/training_curves_{dataset_name}.png
+    """
+    if not os.path.exists(losses_path):
+        print(f"  Skipping per-dataset training curves: {losses_path} not found.")
+        return
+
+    with open(losses_path) as f:
+        all_losses = json.load(f)
+
+    if dataset_name not in all_losses:
+        print(f"  No loss data for dataset '{dataset_name}' in {losses_path}.")
+        return
+
+    ds_losses = all_losses[dataset_name]
+
+    model_styles = {
+        "mlp":            {"color": "#4a90d9", "label": "MC Dropout MLP",  "lw": 1.8},
+        "tabtransformer": {"color": "#e07070", "label": "TabTransformer",   "lw": 1.8},
+    }
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    for model_key, style in model_styles.items():
+        if model_key not in ds_losses:
+            continue
+        raw = ds_losses[model_key]
+        window = max(1, len(raw) // 30)
+        smoothed = np.convolve(raw, np.ones(window) / window, mode="valid")
+        epochs_sm = np.linspace(1, len(raw), len(smoothed))
+        ax.plot(epochs_sm, smoothed, color=style["color"],
+                lw=style["lw"], label=style["label"])
+        ax.plot(range(1, len(raw) + 1), raw,
+                color=style["color"], alpha=0.2, lw=0.8)
+
+    ax.set_title(f"{dataset_name.capitalize()} Dataset -- Training Loss", fontsize=12)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("BCE Loss")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.3)
+
+    fig.suptitle("Deep Learning Training Curves: MLP vs TabTransformer", fontsize=13)
+    plt.tight_layout()
+    path = f"results/training_curves_{dataset_name}.png"
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"Saved: {path}")
+
+
 if __name__ == "__main__":
     df = pd.read_csv("results/detection_delay_table.csv")
     for dataset_name in df["dataset"].unique():
         plot_detection_delay_heatmap(df, dataset_name)
         plot_alarm_vs_drop(df, dataset_name)
     plot_training_curves()
+    # Per-dataset training curves
+    losses_path = "results/training_losses.json"
+    if os.path.exists(losses_path):
+        with open(losses_path) as f:
+            all_losses = json.load(f)
+        for dataset_name in all_losses:
+            plot_training_curves_per_dataset(dataset_name, losses_path)
     print("\nAll plots saved to results/")
