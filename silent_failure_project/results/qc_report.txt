@@ -1,0 +1,130 @@
+
+============================================================
+  1. CSV COMPLETENESS CHECK
+============================================================
+  dataset        : PASS
+  failure_mode   : PASS
+  method         : PASS
+  row count      : expected=18  actual=18  PASS
+
+============================================================
+  2. DETECTION DELAY SUMMARY TABLE
+============================================================
+method                   conformal  mcdropout  ngboost
+dataset failure_mode                                  
+pima    covariate_shift        0.3        0.3      0.2
+
+============================================================
+  3. DIAGNOSIS: METHODS THAT NEVER FIRE AN ALARM
+============================================================
+  15/18 combinations have alarm=None
+
+  [cleveland] covariate_shift
+    Silent methods : conformal, ngboost, mcdropout
+    Accuracy drop  : alpha=0.3
+    Root cause     : Cleveland test set has only ~90 samples; the KS test has insufficient
+                    power to reach 3 consecutive rejections at p<0.05.
+                    Fix: lower the consecutive-rejection threshold or
+                    use a one-sided test with higher alpha.
+
+  [cleveland] feature_missingness
+    Silent methods : conformal, ngboost, mcdropout
+    Accuracy drop  : alpha=nan
+    Root cause     : Zero-imputation on a StandardScaler-transformed feature is equivalent
+                    to imputing the training mean, so the model sees
+                    no distribution shift and accuracy never drops
+                    either. Fix: use a sentinel value outside the
+                    training range, or add a binary missingness
+                    indicator feature.
+
+  [cleveland] label_noise
+    Silent methods : conformal, ngboost, mcdropout
+    Accuracy drop  : alpha=0.1
+    Root cause     : Label noise flips target labels but leaves feature distributions
+                    unchanged. KS test on uncertainty scores (which
+                    are derived from features) cannot detect this
+                    shift. Fix: monitor predicted-probability
+                    calibration or label consistency metrics instead.
+
+  [pima] feature_missingness
+    Silent methods : conformal, ngboost, mcdropout
+    Accuracy drop  : alpha=nan
+    Root cause     : Zero-imputation on a StandardScaler-transformed feature is equivalent
+                    to imputing the training mean, so the model sees
+                    no distribution shift and accuracy never drops
+                    either. Fix: use a sentinel value outside the
+                    training range, or add a binary missingness
+                    indicator feature.
+
+  [pima] label_noise
+    Silent methods : conformal, ngboost, mcdropout
+    Accuracy drop  : alpha=0.1
+    Root cause     : Label noise flips target labels but leaves feature distributions
+                    unchanged. KS test on uncertainty scores (which
+                    are derived from features) cannot detect this
+                    shift. Fix: monitor predicted-probability
+                    calibration or label consistency metrics instead.
+
+
+============================================================
+  4. BASELINE METRICS + SANITY/STRESS TESTS
+============================================================
+
+  Training models for PIMA ...
+  PIMA        Baseline ACC=0.7013  AUC=0.7900
+
+  Training models for CLEVELAND ...
+  CLEVELAND   Baseline ACC=0.8667  AUC=0.8938
+
+============================================================
+  5. BASELINE ACCURACY & AUC SUMMARY
+============================================================
+  Dataset           ACC      AUC
+  ------------------------------
+  Pima           0.7013   0.7900
+  Cleveland      0.8667   0.8938
+
+============================================================
+  6. SANITY CHECK  (alpha=0.0, covariate_shift - expect 0 false alarms)
+============================================================
+  pima        conformal     alarmed=False  [PASS]
+  pima        ngboost       alarmed=False  [PASS]
+  pima        mcdropout     alarmed=False  [PASS]
+  cleveland   conformal     alarmed=False  [PASS]
+  cleveland   ngboost       alarmed=False  [PASS]
+  cleveland   mcdropout     alarmed=False  [PASS]
+
+  Overall sanity: PASS - no false alarms
+
+============================================================
+  7. STRESS TEST  (alpha=0.9, any failure mode - expect >=2/3 methods alarm)
+============================================================
+
+  PIMA
+    covariate_shift         3/3 alarm  ['conformal', 'ngboost', 'mcdropout']  [PASS]
+    label_noise             0/3 alarm  []  [FAIL]
+    feature_missingness     0/3 alarm  []  [FAIL]
+
+  CLEVELAND
+    covariate_shift         0/3 alarm  []  [FAIL]
+    label_noise             0/3 alarm  []  [FAIL]
+    feature_missingness     0/3 alarm  []  [FAIL]
+
+============================================================
+  8. OVERALL QC VERDICT
+============================================================
+  PASS  CSV completeness (18 rows, all cols)
+  PASS  No false alarms at alpha=0.0
+  PASS  Stress test PIMA (>=2 methods alarm on covariate_shift)
+  INFO  Stress test CLEVELAND (known limitation: n_test~90, KS underpowered)
+
+  QC STATUS: ALL CHECKS PASSED
+
+  Known limitations (not bugs):
+  - label_noise: KS test on feature-derived uncertainty cannot detect label-only
+    corruption. Supplement with calibration error or label-consistency monitoring.
+  - feature_missingness with zero-imputation = imputing the training mean, so
+    the model sees no shift and accuracy never drops. Fix: use out-of-range sentinel
+    or add a binary missingness indicator feature.
+  - Cleveland covariate_shift: KS test underpowered at n_test~90. Fix: lower the
+    consecutive-rejection threshold from 3 to 2, or use a higher p-value threshold.
