@@ -3,7 +3,7 @@ from mapie.classification import SplitConformalClassifier
 from ngboost import NGBClassifier
 from ngboost.distns import Bernoulli
 from scipy.stats import entropy as scipy_entropy
-from src.models import mc_dropout_predict
+from src.models import mc_dropout_predict, tabtransformer_predict
 
 
 # ─────────────────────────────────────────────
@@ -57,13 +57,12 @@ def ngboost_uncertainty(ngb_model, X):
     """
     proba = ngb_model.predict_proba(X)  # shape (N, 2)
     p = proba[:, 1].clip(1e-6, 1 - 1e-6)
-    unc = scipy_entropy([p, 1 - p], base=2).T  # binary entropy per sample
-    # scipy_entropy on 2-row array gives shape (N,)
+    unc = scipy_entropy([p, 1 - p], base=2).T
     return unc
 
 
 # ─────────────────────────────────────────────
-# 3. MC Dropout MLP Variance
+# 3. MC Dropout MLP Variance  (DL baseline #1)
 # ─────────────────────────────────────────────
 
 def mcdropout_uncertainty(mlp_model, X, n_passes=50):
@@ -75,15 +74,42 @@ def mcdropout_uncertainty(mlp_model, X, n_passes=50):
 
 
 # ─────────────────────────────────────────────
+# 4. TabTransformer uncertainty  (DL baseline #2)
+# ─────────────────────────────────────────────
+
+def tabtransformer_uncertainty(tabt_model, X, n_passes=50):
+    """
+    Returns uncertainty as binary entropy of the mean predicted probability,
+    averaged over n_passes stochastic forward passes (dropout active).
+
+    H(p) = -p*log(p) - (1-p)*log(1-p)
+
+    Using entropy of the mean (not raw MC variance) is more reliable for
+    Transformer architectures because residual connections + LayerNorm suppress
+    MC variance structurally — the entropy of the mean probability provides a
+    cleaner signal of prediction confidence and shifts detectably with
+    covariate drift.
+    """
+    mean_prob, _ = tabtransformer_predict(tabt_model, X, n_passes=n_passes)
+    p = mean_prob.clip(1e-6, 1 - 1e-6)
+    entropy = -p * np.log(p) - (1 - p) * np.log(1 - p)
+    return entropy
+
+
+# ─────────────────────────────────────────────
 # Unified interface
 # ─────────────────────────────────────────────
 
-METHODS = ["conformal", "ngboost", "mcdropout"]
+METHODS = ["conformal", "ngboost", "mcdropout", "tabtransformer"]
 
 
 def get_uncertainty(method, models_dict, X, n_passes=50):
     """
-    Unified call. models_dict must contain the relevant fitted model.
+    Unified call. models_dict must contain the relevant fitted model:
+      "mapie"          -> SplitConformalClassifier (conformal)
+      "ngboost"        -> NGBClassifier
+      "mlp"            -> MCDropoutMLP
+      "tabtransformer" -> TabTransformer
     """
     if method == "conformal":
         return conformal_uncertainty(models_dict["mapie"], X)
@@ -91,5 +117,7 @@ def get_uncertainty(method, models_dict, X, n_passes=50):
         return ngboost_uncertainty(models_dict["ngboost"], X)
     elif method == "mcdropout":
         return mcdropout_uncertainty(models_dict["mlp"], X, n_passes=n_passes)
+    elif method == "tabtransformer":
+        return tabtransformer_uncertainty(models_dict["tabtransformer"], X, n_passes=n_passes)
     else:
         raise ValueError(f"Unknown method: {method}")
