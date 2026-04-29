@@ -1,0 +1,9 @@
+dataset,method,method_label,baseline_acc,baseline_auc,mean_uncertainty,ECE,Brier_Score
+pima,conformal,Conformal (MAPIE),0.7013,0.79,0.178291,0.1288,0.1882
+pima,ngboost,NGBoost Entropy,0.7013,0.79,0.726323,0.1288,0.1882
+pima,mcdropout,MC Dropout MLP,0.7013,0.79,0.006569,0.1288,0.1882
+pima,tabtransformer,TabTransformer,0.7013,0.79,0.436621,0.1288,0.1882
+cleveland,conformal,Conformal (MAPIE),0.8667,0.8938,0.12992,0.1106,0.1281
+cleveland,ngboost,NGBoost Entropy,0.8667,0.8938,0.498127,0.1106,0.1281
+cleveland,mcdropout,MC Dropout MLP,0.8667,0.8938,0.006813,0.1106,0.1281
+cleveland,tabtransformer,TabTransformer,0.8667,0.8938,0.220741,0.1106,0.1281

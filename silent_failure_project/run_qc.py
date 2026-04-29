@@ -7,20 +7,26 @@ Outputs a structured report to results/qc_report.txt.
 import sys, os, textwrap
 sys.path.insert(0, os.path.abspath("."))
 
+from src.seed_everything import seed_everything
+from src.config import (
+    RANDOM_SEED, RESULTS_PATH, DATASETS, METHODS, SEVERITY_LEVELS,
+)
+seed_everything(RANDOM_SEED)
+
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 from src.data_loader import load_dataset
-from src.models import train_xgboost, train_mlp
-from src.inject import apply_failure, FAILURE_MODES, SEVERITY_LEVELS
-from src.uncertainty import fit_conformal, fit_ngboost, get_uncertainty, METHODS
+from src.models import train_xgboost, train_mlp, train_tabtransformer
+from src.inject import apply_failure, FAILURE_MODES
+from src.uncertainty import fit_conformal, fit_ngboost, get_uncertainty
 from src.alarm import run_ks_alarm, accuracy_drop_alpha, detection_delay
+from src.config import N_MC_PASSES
 
-os.makedirs("results", exist_ok=True)
+os.makedirs(RESULTS_PATH, exist_ok=True)
 
-DATASETS = ["pima", "cleveland"]
 FAILURE_MODE_LIST = list(FAILURE_MODES.keys())
 
 lines = []   # accumulated report lines
@@ -38,7 +44,7 @@ def section(title):
 # ─────────────────────────────────────────────────────────────
 section("1. CSV COMPLETENESS CHECK")
 
-csv_path = "results/detection_delay_table.csv"
+csv_path = os.path.join(RESULTS_PATH, "detection_delay_table.csv")
 assert os.path.exists(csv_path), f"FAIL: {csv_path} not found"
 df = pd.read_csv(csv_path)
 
@@ -128,11 +134,17 @@ for ds in DATASETS:
     X_train, X_cal, X_test, y_train, y_cal, y_test, scaler = load_dataset(ds)
     input_dim = X_train.shape[1]
 
-    xgb   = train_xgboost(X_train, y_train)
-    ngb   = fit_ngboost(X_train, y_train)
-    mlp   = train_mlp(X_train, y_train, input_dim=input_dim, epochs=150)
-    mapie = fit_conformal(xgb, X_train, y_train, X_cal, y_cal)
-    models = {"mapie": mapie, "ngboost": ngb, "mlp": mlp}
+    xgb            = train_xgboost(X_train, y_train)
+    ngb            = fit_ngboost(X_train, y_train)
+    mlp, _         = train_mlp(X_train, y_train, input_dim=input_dim)   # FIX B1: unpack tuple
+    tabt, _        = train_tabtransformer(X_train, y_train, input_dim=input_dim)
+    mapie          = fit_conformal(xgb, X_train, y_train, X_cal, y_cal)
+    models = {                                                            # FIX B2: include tabtransformer
+        "mapie":          mapie,
+        "ngboost":        ngb,
+        "mlp":            mlp,
+        "tabtransformer": tabt,
+    }
 
     # Baseline accuracy + AUC
     acc = accuracy_score(y_test, xgb.predict(X_test))
@@ -141,7 +153,10 @@ for ds in DATASETS:
     log(f"  {ds.upper():10s}  Baseline ACC={acc:.4f}  AUC={auc:.4f}")
 
     # Clean baseline uncertainty (used by both tests)
-    baseline_unc = {m: get_uncertainty(m, models, X_test) for m in METHODS}
+    baseline_unc = {
+        m: get_uncertainty(m, models, X_test, n_passes=N_MC_PASSES[m])
+        for m in METHODS
+    }
 
     # -- Sanity check: alpha=0.0 ----------------------------------------
     X_clean, y_clean = apply_failure(X_test, y_test, "covariate_shift", 0.0)
@@ -196,8 +211,9 @@ for ds in DATASETS:
     for fm in FAILURE_MODE_LIST:
         alarmed_methods = [m for m in METHODS if stress_results.get((ds, fm, m), False)]
         n_alarmed = len(alarmed_methods)
+        n_methods = len(METHODS)
         status = "PASS" if n_alarmed >= 2 else "FAIL"
-        log(f"    {fm:22s}  {n_alarmed}/3 alarm  {alarmed_methods}  [{status}]")
+        log(f"    {fm:22s}  {n_alarmed}/{n_methods} alarm  {alarmed_methods}  [{status}]")
 
 # ─────────────────────────────────────────────────────────────
 # 8.  Overall QC verdict
@@ -212,7 +228,7 @@ stress_pass = sum(
 stress_total = len(DATASETS) * len(FAILURE_MODE_LIST)
 
 verdicts = {
-    "CSV completeness (18 rows, all cols)": actual_rows == expected_rows,
+    f"CSV completeness ({expected_rows} rows, all cols)": actual_rows == expected_rows,
     "No false alarms at alpha=0.0":         not any_false_alarm,
     "Stress test PIMA (>=2 methods alarm on covariate_shift)":
         sum(stress_results.get(("pima", "covariate_shift", m), False) for m in METHODS) >= 2,
@@ -242,7 +258,7 @@ log("    consecutive-rejection threshold from 3 to 2, or use a higher p-value th
 # ─────────────────────────────────────────────────────────────
 # Write report
 # ─────────────────────────────────────────────────────────────
-report_path = "results/qc_report.txt"
+report_path = os.path.join(RESULTS_PATH, "qc_report.txt")
 with open(report_path, "w", encoding="utf-8") as f:
     f.write("\n".join(lines) + "\n")
 
