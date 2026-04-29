@@ -1,41 +1,90 @@
+"""
+src/models.py
+Model definitions, training functions, and wrapper classes.
+
+All four uncertainty estimators share a common interface:
+  .fit(X_train, y_train)
+  .predict_proba(X)           → np.ndarray shape (n, 2)
+  .predict_uncertainty(X)     → np.ndarray shape (n,), higher = more uncertain
+  .score(X, y)                → float accuracy
+
+Training functions return (model, loss_history) for DL models,
+or (model, None) for classical models, for uniform handling.
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
-from xgboost import XGBClassifier
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import cross_val_score
+from xgboost import XGBClassifier
+
+from src.config import (
+    RANDOM_SEED,
+    XGB_PARAMS,
+    NGB_N_ESTIMATORS,
+    MLP_HIDDEN_DIM, MLP_DROPOUT, MLP_EPOCHS, MLP_LR,
+    TABT_EMBED_DIM, TABT_NHEAD, TABT_NUM_LAYERS, TABT_DIM_FEEDFORWARD,
+    TABT_ATTN_DROPOUT, TABT_MLP_DROPOUT, TABT_EPOCHS, TABT_LR,
+    TABT_WEIGHT_DECAY, TABT_LR_PATIENCE, TABT_LR_FACTOR, TABT_MIN_LR,
+    TABT_GRAD_CLIP,
+)
 
 
-# ─────────────────────────────────────────────
-# XGBoost Baseline
-# ─────────────────────────────────────────────
+# ── XGBoost ────────────────────────────────────────────────────────────────
 
-def get_xgboost(random_state=42):
-    return XGBClassifier(
-        n_estimators=200,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric="logloss",
-        random_state=random_state,
-        verbosity=0,
-    )
+def get_xgboost(random_state: int = RANDOM_SEED) -> XGBClassifier:
+    """Instantiate an XGBoost classifier with project-standard params.
+
+    Args:
+        random_state: Seed passed to XGBClassifier.
+
+    Returns:
+        Unfitted XGBClassifier.
+    """
+    params = dict(XGB_PARAMS)
+    params["random_state"] = random_state
+    return XGBClassifier(**params)
 
 
-def train_xgboost(X_train, y_train, random_state=42):
+def train_xgboost(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    random_state: int = RANDOM_SEED,
+) -> XGBClassifier:
+    """Fit an XGBoost classifier and print 5-fold CV AUC.
+
+    Args:
+        X_train: Training features, shape (n, d).
+        y_train: Training labels, shape (n,).
+        random_state: Seed for reproducibility.
+
+    Returns:
+        Fitted XGBClassifier.
+    """
     model = get_xgboost(random_state)
     model.fit(X_train, y_train)
     cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring="roc_auc")
-    print(f"[XGBoost] 5-fold CV AUC: {cv_scores.mean():.4f} +/- {cv_scores.std():.4f}")
+    print(f"  [XGBoost] 5-fold CV AUC: {cv_scores.mean():.4f} +/- {cv_scores.std():.4f}")
     return model
 
 
-# ─────────────────────────────────────────────
-# MC Dropout MLP  (deep learning baseline #1)
-# ─────────────────────────────────────────────
+# ── MC Dropout MLP ─────────────────────────────────────────────────────────
 
 class MCDropoutMLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, dropout=0.3):
+    """Two-hidden-layer MLP with dropout at inference time for MC sampling.
+
+    Architecture: Linear(d->H) -> ReLU -> Dropout(p) ->
+                  Linear(H->H) -> ReLU -> Dropout(p) ->
+                  Linear(H->1)
+
+    MC Dropout: call enable_dropout() before inference to keep Dropout layers
+    in train mode, then run multiple forward passes to estimate epistemic
+    uncertainty via prediction variance.
+    """
+
+    def __init__(self, input_dim: int, hidden_dim: int = MLP_HIDDEN_DIM,
+                 dropout: float = MLP_DROPOUT):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -47,23 +96,43 @@ class MCDropoutMLP(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)
 
-    def enable_dropout(self):
-        """Keep dropout active at inference time for MC sampling."""
+    def enable_dropout(self) -> None:
+        """Set all Dropout layers to train mode (activates stochastic masking)."""
         for m in self.modules():
             if isinstance(m, nn.Dropout):
                 m.train()
 
 
-def train_mlp(X_train, y_train, input_dim, epochs=150, lr=1e-3,
-              hidden_dim=64, dropout=0.3, random_state=42):
-    """
-    Returns (model, loss_history).
+def train_mlp(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    input_dim: int,
+    epochs: int = MLP_EPOCHS,
+    lr: float = MLP_LR,
+    hidden_dim: int = MLP_HIDDEN_DIM,
+    dropout: float = MLP_DROPOUT,
+    random_state: int = RANDOM_SEED,
+) -> tuple:
+    """Train an MCDropoutMLP with BCE loss and Adam optimizer.
+
+    Args:
+        X_train: Training features, shape (n, d).
+        y_train: Training labels, shape (n,).
+        input_dim: Number of input features.
+        epochs: Training epochs.
+        lr: Learning rate.
+        hidden_dim: Hidden layer width.
+        dropout: Dropout probability.
+        random_state: Torch manual seed.
+
+    Returns:
+        (model, losses): Trained model and per-epoch BCE loss history.
     """
     torch.manual_seed(random_state)
-    model = MCDropoutMLP(input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout)
+    model     = MCDropoutMLP(input_dim=input_dim, hidden_dim=hidden_dim, dropout=dropout)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.BCEWithLogitsLoss()
 
@@ -74,83 +143,92 @@ def train_mlp(X_train, y_train, input_dim, epochs=150, lr=1e-3,
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        logits = model(X_t)
-        loss = criterion(logits, y_t)
+        loss = criterion(model(X_t), y_t)
         loss.backward()
         optimizer.step()
-        losses.append(loss.item())
+        losses.append(float(loss.item()))
         if (epoch + 1) % 30 == 0:
-            print(f"  [MLP] Epoch {epoch+1}/{epochs}  loss={loss.item():.4f}")
+            print(f"    [MLP] Epoch {epoch+1}/{epochs}  loss={loss.item():.4f}")
 
     return model, losses
 
 
-def mc_dropout_predict(model, X, n_passes=50):
-    """
-    Run n_passes stochastic forward passes with dropout enabled.
+def mc_dropout_predict(
+    model: MCDropoutMLP,
+    X: np.ndarray,
+    n_passes: int = 50,
+) -> tuple:
+    """Run n_passes stochastic forward passes with dropout active.
+
+    Args:
+        model: Trained MCDropoutMLP.
+        X: Feature array, shape (n, d).
+        n_passes: Number of stochastic forward passes.
+
     Returns:
-        mean_probs: shape (N,)  — mean predicted probability
-        variance:   shape (N,)  — epistemic uncertainty proxy
+        mean_probs: Mean predicted probability per sample, shape (n,).
+        variance: Epistemic uncertainty proxy (MC variance), shape (n,).
     """
     model.eval()
     model.enable_dropout()
 
-    X_t = torch.tensor(X, dtype=torch.float32)
+    X_t   = torch.tensor(X, dtype=torch.float32)
     preds = []
 
     with torch.no_grad():
         for _ in range(n_passes):
-            logits = model(X_t)
-            probs = torch.sigmoid(logits).cpu().numpy()
-            preds.append(probs)
+            preds.append(torch.sigmoid(model(X_t)).cpu().numpy())
 
-    preds = np.stack(preds, axis=0)   # (n_passes, N)
+    preds      = np.stack(preds, axis=0)   # (n_passes, n)
     mean_probs = preds.mean(axis=0)
     variance   = preds.var(axis=0)
     return mean_probs, variance
 
 
-# ─────────────────────────────────────────────
-# TabTransformer  (deep learning baseline #2)
-# ─────────────────────────────────────────────
+# ── TabTransformer ─────────────────────────────────────────────────────────
 
 class TabTransformer(nn.Module):
-    """
-    Lightweight TabTransformer for binary tabular classification.
+    """Lightweight TabTransformer for binary tabular classification.
 
     Architecture:
       1. Per-feature linear projection: (B, F) -> (B, F, embed_dim)
-      2. num_layers x TransformerEncoderLayer (nhead, dim_feedforward, dropout)
-      3. Global average pooling across the feature dimension: (B, embed_dim)
-      4. Two-layer MLP head with dropout for binary classification.
+      2. Learned positional bias: one embedding per feature position
+      3. num_layers x TransformerEncoderLayer (pre-norm for stability)
+      4. Global average pooling across feature dimension: (B, embed_dim)
+      5. Two-layer MLP head with dropout -> scalar logit
 
-    MC-Dropout uncertainty: call enable_dropout() before inference to keep
-    attention + MLP dropout active, then run multiple stochastic forward passes.
+    Uncertainty: call enable_dropout() before inference and run multiple
+    stochastic forward passes. Use entropy of the MEAN predicted probability
+    (not raw MC variance) as the uncertainty signal -- residual connections
+    and LayerNorm suppress MC variance structurally in Transformer blocks.
+    See tabtransformer_predict() and KEY FIX comment in uncertainty.py.
     """
 
-    def __init__(self, input_dim, embed_dim=32, nhead=4, num_layers=2,
-                 dim_feedforward=64, attn_dropout=0.1, mlp_dropout=0.3):
+    def __init__(
+        self,
+        input_dim: int,
+        embed_dim: int = TABT_EMBED_DIM,
+        nhead: int = TABT_NHEAD,
+        num_layers: int = TABT_NUM_LAYERS,
+        dim_feedforward: int = TABT_DIM_FEEDFORWARD,
+        attn_dropout: float = TABT_ATTN_DROPOUT,
+        mlp_dropout: float = TABT_MLP_DROPOUT,
+    ):
         super().__init__()
-        self.input_dim = input_dim
-
-        # Shared linear projection: each feature scalar -> embed_dim vector
+        self.input_dim    = input_dim
         self.feature_proj = nn.Linear(1, embed_dim)
-
-        # Positional bias (learned, one per feature) so the transformer can
-        # distinguish features even though inputs are permutation-invariant scalars
-        self.pos_embedding = nn.Parameter(torch.randn(1, input_dim, embed_dim) * 0.01)
-
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, input_dim, embed_dim) * 0.01
+        )
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=attn_dropout,
             batch_first=True,
-            norm_first=True,      # pre-norm for stability on small datasets
+            norm_first=True,   # pre-norm for stability on small datasets
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        # Two-layer MLP head
         self.head = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, embed_dim),
@@ -159,29 +237,53 @@ class TabTransformer(nn.Module):
             nn.Linear(embed_dim, 1),
         )
 
-    def forward(self, x):
-        # x: (B, F)
-        x = x.unsqueeze(-1)                   # (B, F, 1)
-        x = self.feature_proj(x)              # (B, F, embed_dim)
-        x = x + self.pos_embedding            # add learned positional bias
-        x = self.transformer(x)               # (B, F, embed_dim)
-        x = x.mean(dim=1)                     # global avg pool -> (B, embed_dim)
-        return self.head(x).squeeze(-1)        # (B,)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.unsqueeze(-1)         # (B, F, 1)
+        x = self.feature_proj(x)    # (B, F, E)
+        x = x + self.pos_embedding  # add learned positional bias
+        x = self.transformer(x)     # (B, F, E)
+        x = x.mean(dim=1)           # global avg pool -> (B, E)
+        return self.head(x).squeeze(-1)   # (B,)
 
-    def enable_dropout(self):
-        """Activate all Dropout layers at inference time for MC sampling."""
+    def enable_dropout(self) -> None:
+        """Activate all Dropout layers for MC sampling at inference time."""
         for m in self.modules():
             if isinstance(m, nn.Dropout):
                 m.train()
 
 
-def train_tabtransformer(X_train, y_train, input_dim, epochs=250, lr=1e-3,
-                         embed_dim=64, nhead=2, num_layers=2,
-                         dim_feedforward=128, attn_dropout=0.3, mlp_dropout=0.5,
-                         random_state=42):
-    """
-    Train a TabTransformer with BCEWithLogitsLoss + Adam + ReduceLROnPlateau.
-    Returns (model, loss_history).
+def train_tabtransformer(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    input_dim: int,
+    epochs: int = TABT_EPOCHS,
+    lr: float = TABT_LR,
+    embed_dim: int = TABT_EMBED_DIM,
+    nhead: int = TABT_NHEAD,
+    num_layers: int = TABT_NUM_LAYERS,
+    dim_feedforward: int = TABT_DIM_FEEDFORWARD,
+    attn_dropout: float = TABT_ATTN_DROPOUT,
+    mlp_dropout: float = TABT_MLP_DROPOUT,
+    random_state: int = RANDOM_SEED,
+) -> tuple:
+    """Train a TabTransformer with BCE loss, Adam, and ReduceLROnPlateau.
+
+    Args:
+        X_train: Training features, shape (n, d).
+        y_train: Training labels, shape (n,).
+        input_dim: Number of input features.
+        epochs: Training epochs.
+        lr: Initial learning rate.
+        embed_dim: Feature embedding dimension.
+        nhead: Number of attention heads.
+        num_layers: Number of TransformerEncoderLayer blocks.
+        dim_feedforward: FFN hidden size per Transformer block.
+        attn_dropout: Dropout in attention layers.
+        mlp_dropout: Dropout in MLP head.
+        random_state: Torch manual seed.
+
+    Returns:
+        (model, losses): Trained model and per-epoch BCE loss history.
     """
     torch.manual_seed(random_state)
     model = TabTransformer(
@@ -194,9 +296,13 @@ def train_tabtransformer(X_train, y_train, input_dim, epochs=250, lr=1e-3,
         mlp_dropout=mlp_dropout,
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=TABT_WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=20, factor=0.5, min_lr=1e-5
+        optimizer,
+        mode="min",
+        patience=TABT_LR_PATIENCE,
+        factor=TABT_LR_FACTOR,
+        min_lr=TABT_MIN_LR,
     )
     criterion = nn.BCEWithLogitsLoss()
 
@@ -207,41 +313,47 @@ def train_tabtransformer(X_train, y_train, input_dim, epochs=250, lr=1e-3,
     model.train()
     for epoch in range(epochs):
         optimizer.zero_grad()
-        logits = model(X_t)
-        loss = criterion(logits, y_t)
+        loss = criterion(model(X_t), y_t)
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=TABT_GRAD_CLIP)
         optimizer.step()
         scheduler.step(loss.item())
-        losses.append(loss.item())
-        if (epoch + 1) % 40 == 0:
+        losses.append(float(loss.item()))
+        if (epoch + 1) % 50 == 0:
             lr_now = optimizer.param_groups[0]["lr"]
-            print(f"  [TabTransformer] Epoch {epoch+1}/{epochs}  "
+            print(f"    [TabTransformer] Epoch {epoch+1}/{epochs}  "
                   f"loss={loss.item():.4f}  lr={lr_now:.2e}")
 
     return model, losses
 
 
-def tabtransformer_predict(model, X, n_passes=50):
-    """
-    Run n_passes stochastic forward passes with dropout enabled (MC sampling).
+def tabtransformer_predict(
+    model: TabTransformer,
+    X: np.ndarray,
+    n_passes: int = 50,
+) -> tuple:
+    """Run n_passes stochastic forward passes with dropout active.
+
+    Args:
+        model: Trained TabTransformer.
+        X: Feature array, shape (n, d).
+        n_passes: Number of stochastic forward passes.
+
     Returns:
-        mean_probs: shape (N,)  — mean predicted probability
-        variance:   shape (N,)  — epistemic uncertainty proxy
+        mean_probs: Mean predicted probability, shape (n,).
+        variance: MC variance across passes (informational only), shape (n,).
     """
     model.eval()
     model.enable_dropout()
 
-    X_t = torch.tensor(X, dtype=torch.float32)
+    X_t   = torch.tensor(X, dtype=torch.float32)
     preds = []
 
     with torch.no_grad():
         for _ in range(n_passes):
-            logits = model(X_t)
-            probs = torch.sigmoid(logits).cpu().numpy()
-            preds.append(probs)
+            preds.append(torch.sigmoid(model(X_t)).cpu().numpy())
 
-    preds = np.stack(preds, axis=0)   # (n_passes, N)
+    preds      = np.stack(preds, axis=0)   # (n_passes, n)
     mean_probs = preds.mean(axis=0)
     variance   = preds.var(axis=0)
     return mean_probs, variance

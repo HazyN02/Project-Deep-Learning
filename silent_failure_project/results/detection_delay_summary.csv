@@ -1,0 +1,2 @@
+dataset,failure_mode,conformal,mcdropout,ngboost,tabtransformer
+pima,covariate_shift,0.3,0.3,0.2,0.2
